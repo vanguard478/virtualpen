@@ -27,6 +27,7 @@ final class PenView extends View {
     private final byte[] batch = new byte[PenProtocol.MAX_BATCH_BYTES];
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Runnable leaveRange = this::sendOutOfRange;
+    private final PointerIcon hiddenPointer;
     private boolean inRange;
     private String status = "";
 
@@ -39,6 +40,8 @@ final class PenView extends View {
         textPaint.setTextAlign(Paint.Align.CENTER);
         setFocusable(true);
         setFocusableInTouchMode(true);
+        // Resolved once: onResolvePointerIcon runs on every hover event.
+        hiddenPointer = PointerIcon.getSystemIcon(context, PointerIcon.TYPE_NULL);
     }
 
     void setStatus(String text) {
@@ -68,7 +71,7 @@ final class PenView extends View {
 
     @Override
     public PointerIcon onResolvePointerIcon(MotionEvent event, int pointerIndex) {
-        return PointerIcon.getSystemIcon(getContext(), PointerIcon.TYPE_NULL);
+        return hiddenPointer;
     }
 
     @Override
