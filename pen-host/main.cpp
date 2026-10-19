@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include "link.h"
+#include "monitors.h"
 #include "pen.h"
 
 namespace vp {
@@ -25,8 +26,12 @@ void usage() {
             "usage: virtualpen-host [options]\n"
             "  --usb VID[:PID]        tablet USB id to switch to accessory mode (default 04e8 = Samsung)\n"
             "  --tcp PORT             use TCP via `adb reverse` instead of USB accessory mode\n"
-            "  --screen WxH           monitor size in px; keeps the tablet aspect ratio (no stretched ink)\n"
-            "  --area X0,Y0,X1,Y1     map the tablet to this part of the output, normalized 0..1\n"
+            "  --list-monitors        show the attached monitors (GNOME) and exit\n"
+            "  --monitor ID           pin the tablet to a monitor: connector (DP-1), number from\n"
+            "                         --list-monitors, or display name; 'auto' = GNOME decides\n"
+            "  --screen WxH           monitor size in px; keeps the tablet aspect ratio (no stretched ink).\n"
+            "                         Taken from --monitor when not given\n"
+            "  --area X0,Y0,X1,Y1     map the tablet to this part of the monitor, normalized 0..1\n"
             "  --pressure-min F       raw pressure treated as zero (default 0)\n"
             "  --pressure-max F       raw pressure treated as full (default 1; lower = lighter touch)\n"
             "  --gamma F              pressure curve exponent (<1 = softer, >1 = firmer; default 1)\n"
@@ -113,7 +118,8 @@ int main(int argc, char **argv) {
     PenConfig cfg;
     UsbOptions usb;
     int tcpPort = 0;
-    bool rt = true, stats = false, dryRun = false;
+    bool rt = true, stats = false, dryRun = false, listMonitors = false;
+    std::string monitorId;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -128,6 +134,8 @@ int main(int argc, char **argv) {
         else if (a == "--stats") stats = true;
         else if (a == "--no-rt") rt = false;
         else if (a == "--dry-run") dryRun = true;
+        else if (a == "--list-monitors") listMonitors = true;
+        else if (a == "--monitor") monitorId = next();
         else if (a == "--tcp") tcpPort = atoi(next());
         else if (a == "--usb") {
             const char *v = next();
@@ -163,6 +171,46 @@ int main(int argc, char **argv) {
         else {
             usage();
             return a == "-h" || a == "--help" ? 0 : 2;
+        }
+    }
+
+    if (listMonitors || !monitorId.empty()) {
+        std::vector<Monitor> monitors;
+        std::string err;
+        if (!queryMonitors(monitors, err)) {
+            fprintf(stderr, "cannot list monitors: %s\n", err.c_str());
+            return 1;
+        }
+        if (listMonitors) {
+            printMonitors(monitors);
+            return 0;
+        }
+        const Monitor *m = nullptr;
+        if (monitorId != "auto") {
+            m = findMonitor(monitors, monitorId, err);
+            if (!m) {
+                fprintf(stderr, "%s. Attached monitors:\n", err.c_str());
+                printMonitors(monitors);
+                return 2;
+            }
+            if (!m->enabled) {
+                fprintf(stderr, "monitor %s is turned off in display settings\n", m->connector.c_str());
+                return 2;
+            }
+        }
+        if (!pinTabletToMonitor(m, err)) {
+            fprintf(stderr, "cannot pin the tablet: %s\n", err.c_str());
+            return 1;
+        }
+        if (m) {
+            if (cfg.screen_w <= 0) {
+                cfg.screen_w = m->width;
+                cfg.screen_h = m->height;
+            }
+            fprintf(stderr, "tablet pinned to %s (%s), %dx%d\n", m->connector.c_str(), m->name.c_str(),
+                    m->width, m->height);
+        } else {
+            fprintf(stderr, "tablet mapping returned to GNOME's automatic choice\n");
         }
     }
 

@@ -41,14 +41,24 @@ cd pen-host
 ./install.sh          # builds, runs tests, installs binary + udev rules + systemd user unit
 ```
 
-Then replug the tablet and run:
+Then pick the monitor you will write on and start the host:
 
 ```sh
-virtualpen-host --screen 2560x1440      # your monitor resolution, keeps handwriting undistorted
+virtualpen-host --list-monitors
+#  #  connector  resolution  position  scale  name
+#  1  DP-1       2560x1440   0,0       1.00   Dell Inc. 27" [primary]
+#  2  eDP-1      1920x1200   2560,0    1.00   Built-in display [built-in]
+
+virtualpen-host --monitor DP-1
 ```
 
-or `systemctl --user enable --now virtualpen-host` after adding your options to
-`~/.config/systemd/user/virtualpen-host.service`.
+The names are the ones GNOME Settings → Displays shows. `--monitor` accepts the connector
+(`DP-1`), the number from the list, or the display name (or any unique part of it). It pins the
+tablet to that monitor and fits the tablet's 16:10 shape inside it, so handwriting isn't stretched.
+
+To run it in the background, add your options (e.g. `--monitor DP-1`) to the `ExecStart` line in
+`~/.config/systemd/user/virtualpen-host.service` and run
+`systemctl --user enable --now virtualpen-host`.
 
 ### Tablet
 
@@ -74,8 +84,10 @@ roughly a millisecond.
 
 | Option | Default | Purpose |
 |---|---|---|
-| `--screen WxH` | off (stretch) | monitor pixel size, so the 16:10 tablet maps to a 16:10 area |
-| `--area X0,Y0,X1,Y1` | `0,0,1,1` | map to part of the output, e.g. `0.5,0,1,1` = right half |
+| `--list-monitors` | | list attached monitors (connector, resolution, position, name) and exit |
+| `--monitor ID` | GNOME's choice | pin the tablet to a monitor; `auto` hands the choice back to GNOME |
+| `--screen WxH` | from `--monitor`, else off (stretch) | monitor pixel size, so the 16:10 tablet maps to a 16:10 area |
+| `--area X0,Y0,X1,Y1` | `0,0,1,1` | map to part of the monitor, e.g. `0.5,0,1,1` = right half |
 | `--pressure-max F` | `1.0` | lower it (e.g. `0.7`) to reach full pressure with a lighter hand |
 | `--pressure-min F` | `0.0` | ignore the bottom of the raw range |
 | `--gamma F` | `1.0` | `<1` makes light strokes thicker, `>1` thinner |
@@ -100,13 +112,20 @@ roughly a millisecond.
    (`--ozone-platform=wayland` / `--ozone-platform=x11` for Chrome and Edge; Firefox on Ubuntu 24.04
    runs natively on Wayland).
 
-## Mapping to a specific monitor
+## How the tablet maps to the screen
 
-The device is a display-type tablet (`INPUT_PROP_DIRECT`), so the compositor maps it onto one
-output. With several monitors, choose the output in GNOME Settings → Wacom Tablet if the device is
-listed there. Otherwise set
-`org.gnome.desktop.peripherals.tablet:/org/gnome/desktop/peripherals/tablets/1701:1702/ output`
-with `gsettings`. Then pass that monitor's resolution to `--screen`.
+The tablet doesn't mirror the PC: its surface stands for the chosen monitor, the pen moves the PC
+cursor, and whatever window is under the cursor gets the pen, OneNote included. Put OneNote on
+that monitor (F11 for fullscreen) and write.
+
+How `--monitor` works: the host reads the monitors from GNOME's display service
+(`org.gnome.Mutter.DisplayConfig`) and writes the monitor's EDID vendor, product, serial and
+connector to the tablet's GNOME setting
+`org.gnome.desktop.peripherals.tablet:/org/gnome/desktop/peripherals/tablets/1701:1702/ output`.
+GNOME then confines the tablet to that monitor. The setting persists, so later runs without
+`--monitor` keep the same monitor. Without any setting, GNOME 46 spreads an unknown tablet like
+this one across the whole desktop. `--monitor` needs a GNOME session (the Ubuntu 24.04 default,
+Wayland or Xorg); on other desktops use `--screen` and `--area`.
 
 ## Where the latency goes
 

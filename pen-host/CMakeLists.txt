@@ -10,13 +10,15 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2 -march=native")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
 
-add_executable(virtualpen-host main.cpp pen.cpp usb.cpp tcp.cpp)
+add_executable(virtualpen-host main.cpp pen.cpp usb.cpp tcp.cpp monitors.cpp)
 target_compile_options(virtualpen-host PRIVATE -Wall -Wextra)
-target_link_libraries(virtualpen-host PRIVATE PkgConfig::LIBUSB)
+target_link_libraries(virtualpen-host PRIVATE PkgConfig::LIBUSB PkgConfig::GLIB)
 
-add_executable(pen-test test.cpp pen.cpp)
+add_executable(pen-test test.cpp pen.cpp monitors.cpp)
 target_compile_options(pen-test PRIVATE -Wall -Wextra)
+target_link_libraries(pen-test PRIVATE PkgConfig::GLIB)
 
 enable_testing()
 add_test(NAME pen-test COMMAND pen-test)

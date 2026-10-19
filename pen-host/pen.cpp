@@ -192,8 +192,8 @@ bool UinputPen::open(const char *name) {
     uinput_setup setup{};
     snprintf(setup.name, sizeof(setup.name), "%s", name);
     setup.id.bustype = BUS_VIRTUAL;
-    setup.id.vendor = 0x1701;
-    setup.id.product = 0x1702;
+    setup.id.vendor = UINPUT_VENDOR;
+    setup.id.product = UINPUT_PRODUCT;
     setup.id.version = 2;
     ok = ok && ioctl(fd_, UI_DEV_SETUP, &setup) == 0 && ioctl(fd_, UI_DEV_CREATE) == 0;
     if (!ok) {

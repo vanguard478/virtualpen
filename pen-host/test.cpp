@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "monitors.h"
 #include "pen.h"
 #include "protocol.h"
 
@@ -229,7 +230,44 @@ static void testAspect() {
     CHECK(last(ev, EV_ABS, ABS_Y) == ABS_XY_MAX);
 }
 
+// Shaped like `gdbus call ... DisplayConfig.GetCurrentState` output on GNOME 46:
+// a scaled 4K primary, a portrait monitor and a laptop panel that is turned off.
+static const char *kDisplayState = R"GV((uint32 7, [(('DP-1', 'DEL', 'DELL U2720Q', 'CN0ABC'), [('3840x2160@59.997', 3840, 2160, 59.997, 2.0, [1.0, 2.0], {'is-current': <true>, 'is-preferred': <true>}), ('2560x1440@59.951', 2560, 1440, 59.951, 1.0, [1.0], @a{sv} {})], {'is-underscanning': <false>, 'display-name': <'Dell Inc. 27"'>, 'is-builtin': <false>}), (('HDMI-1', 'GSM', 'LG HDR 4K', '0x0001'), [('2560x1440@60.000', 2560, 1440, 60.0, 1.0, [1.0], {'is-current': <true>})], {'display-name': <'LG Electronics 27"'>}), (('eDP-1', 'BOE', '0x0a1b', '0x00000000'), [('1920x1200@60.000', 1920, 1200, 60.0, 1.0, [1.0], {'is-current': <true>})], {'display-name': <'Built-in display'>, 'is-builtin': <true>})], [(0, 0, 2.0, uint32 0, true, [('DP-1', 'DEL', 'DELL U2720Q', 'CN0ABC')], @a{sv} {}), (1920, 0, 1.0, uint32 1, false, [('HDMI-1', 'GSM', 'LG HDR 4K', '0x0001')], @a{sv} {})], {'layout-mode': <uint32 2>, 'supports-changing-layout-mode': <true>}))GV";
+
+static void testMonitors() {
+    std::vector<Monitor> mons;
+    std::string err;
+    CHECK(parseDisplayState(kDisplayState, mons, err));
+    CHECK(mons.size() == 3);
+    if (mons.size() != 3) return;
+
+    const Monitor &dell = mons[0];
+    CHECK(dell.connector == "DP-1" && dell.vendor == "DEL" && dell.product == "DELL U2720Q" &&
+          dell.serial == "CN0ABC");
+    CHECK(dell.name == "Dell Inc. 27\"");
+    CHECK(dell.width == 3840 && dell.height == 2160);  // current mode, not the first listed
+    CHECK(dell.enabled && dell.primary && dell.scale == 2.0);
+
+    const Monitor &lg = mons[1];
+    CHECK(lg.enabled && !lg.primary && lg.x == 1920);
+    CHECK(lg.width == 1440 && lg.height == 2560);  // rotated 90 degrees
+
+    CHECK(!mons[2].enabled && mons[2].builtin);
+
+    CHECK(findMonitor(mons, "hdmi-1", err) == &mons[1]);
+    CHECK(findMonitor(mons, "1", err) == &mons[0]);
+    CHECK(findMonitor(mons, "Built-in display", err) == &mons[2]);
+    CHECK(findMonitor(mons, "lg", err) == &mons[1]);
+    CHECK(findMonitor(mons, "u2720q", err) == &mons[0]);
+    CHECK(findMonitor(mons, "27", err) == nullptr);  // ambiguous
+    CHECK(findMonitor(mons, "DP-9", err) == nullptr);
+    CHECK(findMonitor(mons, "4", err) == nullptr);
+
+    CHECK(!parseDisplayState("not a variant", mons, err));
+}
+
 int main() {
+    testMonitors();
     testDecoder();
     testStroke();
     testDirectContact();

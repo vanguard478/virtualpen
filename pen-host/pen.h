@@ -8,6 +8,10 @@
 
 namespace vp {
 
+// USB ids of the virtual tablet; GNOME keys its per-tablet settings on them.
+constexpr unsigned UINPUT_VENDOR = 0x1701;
+constexpr unsigned UINPUT_PRODUCT = 0x1702;
+
 // Axis ranges exposed by the virtual tablet.
 constexpr int ABS_XY_MAX = 65535;
 constexpr int ABS_PRESSURE_MAX = 65535;

@@ -5,9 +5,9 @@ set -eu
 
 cd "$(dirname "$0")"
 
-if ! pkg-config --exists libusb-1.0; then
+if ! pkg-config --exists libusb-1.0 glib-2.0; then
     echo "Installing build dependencies (sudo)..."
-    sudo apt-get install -y build-essential cmake pkg-config libusb-1.0-0-dev
+    sudo apt-get install -y build-essential cmake pkg-config libusb-1.0-0-dev libglib2.0-dev
 fi
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
