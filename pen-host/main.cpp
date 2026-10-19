@@ -1,5 +1,7 @@
 // virtualpen-host: turns a Galaxy Tab S9+ running the Virtual Pen app into a
 // pressure/tilt tablet on Linux via uinput.
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -9,9 +11,12 @@
 #include <sys/resource.h>
 #include <time.h>
 
+#include "controls.h"
 #include "link.h"
 #include "monitors.h"
+#include "patch.h"
 #include "pen.h"
+#include "preview.h"
 
 namespace vp {
 volatile sig_atomic_t g_stop = 0;
@@ -31,7 +36,15 @@ void usage() {
             "                         --list-monitors, or display name; 'auto' = GNOME decides\n"
             "  --screen WxH           monitor size in px; keeps the tablet aspect ratio (no stretched ink).\n"
             "                         Taken from --monitor when not given\n"
-            "  --area X0,Y0,X1,Y1     map the tablet to this part of the monitor, normalized 0..1\n"
+            "  --area X0,Y0,X1,Y1     fixed mapping to this part of the monitor, normalized 0..1\n"
+            "                         (turns off the movable patch and the preview)\n"
+            "  --zoom Z               initial patch size: 1, 1.5 or 2 = handwriting magnification (default 1)\n"
+            "  --monitor-size-mm WxH  physical monitor size if the monitor does not report it\n"
+            "  --no-preview           do not stream the patch to the tablet\n"
+            "  --preview-fps N        preview frame rate (default 60)\n"
+            "  --preview-mbps N       preview bitrate in Mbit/s (default 12)\n"
+            "  --encoder NAME         auto (default), nvenc or x264\n"
+            "  --scroll-px N          screen pixels per wheel notch for two-finger scrolling (default 53)\n"
             "  --pressure-min F       raw pressure treated as zero (default 0)\n"
             "  --pressure-max F       raw pressure treated as full (default 1; lower = lighter touch)\n"
             "  --gamma F              pressure curve exponent (<1 = softer, >1 = firmer; default 1)\n"
@@ -117,8 +130,10 @@ struct Stats {
 int main(int argc, char **argv) {
     PenConfig cfg;
     UsbOptions usb;
-    int tcpPort = 0;
-    bool rt = true, stats = false, dryRun = false, listMonitors = false;
+    PreviewOptions popt;
+    int tcpPort = 0, zoomPreset = 0;
+    double monMmW = 0, monMmH = 0, scrollPx = 53.0;
+    bool rt = true, stats = false, dryRun = false, listMonitors = false, areaGiven = false, previewOn = true;
     std::string monitorId;
 
     for (int i = 1; i < argc; i++) {
@@ -130,7 +145,7 @@ int main(int argc, char **argv) {
             }
             return argv[++i];
         };
-        if (a == "-v" || a == "--verbose") cfg.verbose = true;
+        if (a == "-v" || a == "--verbose") cfg.verbose = popt.verbose = true;
         else if (a == "--stats") stats = true;
         else if (a == "--no-rt") rt = false;
         else if (a == "--dry-run") dryRun = true;
@@ -152,7 +167,23 @@ int main(int argc, char **argv) {
                 usage();
                 return 2;
             }
-        } else if (a == "--pressure-min") cfg.p_min = atof(next());
+            areaGiven = true;
+        } else if (a == "--zoom") {
+            double z = atof(next());
+            zoomPreset = 0;
+            for (int p = 0; p < Patch::kPresetCount; p++)
+                if (std::fabs(Patch::kPresets[p] - z) < std::fabs(Patch::kPresets[zoomPreset] - z)) zoomPreset = p;
+        } else if (a == "--monitor-size-mm") {
+            if (sscanf(next(), "%lfx%lf", &monMmW, &monMmH) != 2) {
+                usage();
+                return 2;
+            }
+        } else if (a == "--no-preview") previewOn = false;
+        else if (a == "--preview-fps") popt.fps = std::max(1, atoi(next()));
+        else if (a == "--preview-mbps") popt.bitrate_kbps = int(atof(next()) * 1000);
+        else if (a == "--encoder") popt.encoder = next();
+        else if (a == "--scroll-px") scrollPx = std::max(1.0, atof(next()));
+        else if (a == "--pressure-min") cfg.p_min = atof(next());
         else if (a == "--pressure-max") cfg.p_max = atof(next());
         else if (a == "--gamma") cfg.gamma = atof(next());
         else if (a == "--tip-floor") cfg.tip_floor = atof(next());
@@ -174,6 +205,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    std::string connector; // monitor the tablet is pinned to, if any
     if (listMonitors || !monitorId.empty()) {
         std::vector<Monitor> monitors;
         std::string err;
@@ -203,6 +235,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (m) {
+            connector = m->connector;
             if (cfg.screen_w <= 0) {
                 cfg.screen_w = m->width;
                 cfg.screen_h = m->height;
@@ -214,6 +247,33 @@ int main(int argc, char **argv) {
         }
     }
 
+    // The patch needs the monitor's position and size on the X screen.
+    Patch patch;
+    bool patchMode = !areaGiven;
+    MonitorGeom geom;
+    if (patchMode) {
+        std::string err;
+        if (queryX11Monitor(connector, geom, err)) {
+            if (monMmW > 0 && monMmH > 0) {
+                geom.mm_w = monMmW;
+                geom.mm_h = monMmH;
+            }
+            patch.setMonitor(geom);
+            patch.setPreset(zoomPreset);
+            fprintf(stderr, "patch mapping on %s: %dx%d px at %d,%d, %.0fx%.0f mm\n", geom.name.c_str(), geom.w,
+                    geom.h, geom.x, geom.y, geom.mm_w, geom.mm_h);
+            if (geom.mm_w <= 0)
+                fprintf(stderr, "warning: monitor size unknown, pass --monitor-size-mm for true 1:1 zoom\n");
+            if (connector.empty())
+                fprintf(stderr, "note: without --monitor GNOME may spread the tablet over all monitors; "
+                                "pass --monitor %s so pen and preview line up\n",
+                        geom.name.c_str());
+        } else {
+            fprintf(stderr, "patch mapping off (%s); using a fixed mapping\n", err.c_str());
+            patchMode = false;
+        }
+    }
+
     struct sigaction sa{};
     sa.sa_handler = onSignal;
     sigaction(SIGINT, &sa, nullptr);
@@ -222,6 +282,18 @@ int main(int argc, char **argv) {
 
     UinputPen pen;
     if (!dryRun && !pen.open("Virtual Pen Stylus")) return 1;
+    Controls controls;
+    controls.wheel_px_per_notch = scrollPx;
+    if (!dryRun) controls.open();
+
+    // Started before raising priority so capture and encoding stay at normal
+    // priority; only the pen thread runs real-time.
+    DownlinkSlot slot;
+    Preview preview(slot, popt);
+    if (patchMode && previewOn) {
+        std::string err;
+        if (!preview.start(geom, err)) fprintf(stderr, "preview disabled: %s\n", err.c_str());
+    }
     if (rt) raisePriority();
 
     PenTranslator translator(cfg);
@@ -230,8 +302,72 @@ int main(int argc, char **argv) {
     std::vector<input_event> out;
     out.reserve(4096);
 
-    auto onConnect = [&] { decoder.reset(); };
-    auto onData = [&](const uint8_t *data, size_t len) {
+    auto sendGeometry = [&] {
+        if (!patchMode || !patch.ready()) return;
+        uint8_t p[16] = {};
+        wr16(p + 0, unsigned(geom.w));
+        wr16(p + 2, unsigned(geom.h));
+        wr16(p + 4, unsigned(patch.x));
+        wr16(p + 6, unsigned(patch.y));
+        wr16(p + 8, unsigned(patch.w));
+        wr16(p + 10, unsigned(patch.h));
+        p[12] = uint8_t(patch.preset());
+        p[13] = uint8_t((translator.stickyEraser() ? GEO_ERASER : 0) | (preview.running() ? GEO_PREVIEW : 0));
+        wr16(p + 14, unsigned(std::lround(patch.zoom() * 100)));
+        std::vector<uint8_t> msg = downlinkMessage(DL_GEOMETRY, 0, p, sizeof(p));
+        slot.send(msg.data(), msg.size(), false);
+    };
+    auto applyPatch = [&] {
+        double r[4];
+        patch.normalized(r);
+        translator.setRect(r);
+        preview.setRegion(patch.x, patch.y, patch.w, patch.h);
+        sendGeometry();
+        fprintf(stderr, "patch %dx%d at %d,%d (zoom %.1f)\n", patch.w, patch.h, patch.x, patch.y, patch.zoom());
+    };
+    auto onHello = [&](const Hello &h) {
+        translator.onHello(h);
+        if (!patchMode) return;
+        if (patch.setTablet(h.width, h.height, h.xdpi, h.ydpi)) applyPatch();
+        else sendGeometry();
+    };
+    auto onCommand = [&](const Command &c) {
+        if (cfg.verbose) fprintf(stderr, "command %d (%d, %d)\n", c.cmd, c.a, c.b);
+        switch (c.cmd) {
+        case CMD_UNDO: controls.undo(); break;
+        case CMD_REDO: controls.redo(); break;
+        case CMD_ERASER:
+            translator.setStickyEraser(c.a != 0);
+            sendGeometry();
+            break;
+        case CMD_SCROLL: {
+            double k = patchMode ? patch.monitorPxPerTabletPx() : 1.0;
+            controls.scroll(c.a * k, c.b * k);
+            break;
+        }
+        case CMD_KEYFRAME: preview.requestKeyframe(); break;
+        case CMD_PATCH_STEP:
+        case CMD_PATCH_NEXT:
+        case CMD_PATCH_PRESET:
+        case CMD_PATCH_DRAG:
+            if (!patchMode || !patch.ready()) break;
+            if (c.cmd == CMD_PATCH_STEP) patch.step(c.a, c.b);
+            else if (c.cmd == CMD_PATCH_NEXT) patch.next();
+            else if (c.cmd == CMD_PATCH_PRESET) patch.setPreset(c.a);
+            else patch.drag(c.a, c.b);
+            applyPatch();
+            break;
+        default: break;
+        }
+    };
+
+    LinkEvents events;
+    events.up = [&](Downlink *d) {
+        decoder.reset();
+        slot.set(d);
+        preview.linkUp();
+    };
+    events.data = [&](const uint8_t *data, size_t len) {
         out.clear();
         decoder.feed(
             data, len,
@@ -239,20 +375,22 @@ int main(int argc, char **argv) {
                 translator.onSample(s, out);
                 if (stats) st.sample(s);
             },
-            [&](const Hello &h) { translator.onHello(h); });
+            onHello, onCommand);
         pen.write(out);
         if (stats) st.batch();
     };
-    auto onDisconnect = [&] {
+    events.down = [&] {
+        slot.set(nullptr);
         out.clear();
         translator.release(out);
         pen.write(out);
     };
 
-    if (tcpPort > 0) runTcp(tcpPort, onConnect, onData, onDisconnect);
-    else runUsb(usb, onConnect, onData, onDisconnect, cfg.verbose);
+    if (tcpPort > 0) runTcp(tcpPort, events);
+    else runUsb(usb, events, cfg.verbose);
 
-    onDisconnect();
+    preview.stop();
+    events.down();
     if (decoder.dropped()) fprintf(stderr, "%llu malformed bytes skipped\n", (unsigned long long)decoder.dropped());
     return 0;
 }

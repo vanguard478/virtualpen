@@ -4,7 +4,9 @@
 #include <vector>
 
 #include "monitors.h"
+#include "patch.h"
 #include "pen.h"
+#include "preview.h"
 #include "protocol.h"
 
 using namespace vp;
@@ -64,7 +66,14 @@ static void testDecoder() {
     hello[1] = PROTOCOL_VERSION;
     put16(&hello[2], 2800);
     put16(&hello[4], 1752);
+    put16(&hello[6], 2663);
+    std::vector<uint8_t> cmd(PKT_SIZE, 0);
+    cmd[0] = PKT_COMMAND;
+    cmd[1] = CMD_SCROLL;
+    put16(&cmd[2], uint16_t(-12));
+    put16(&cmd[4], 300);
     stream.insert(stream.end(), hello.begin(), hello.end());
+    stream.insert(stream.end(), cmd.begin(), cmd.end());
     stream.insert(stream.end(), a.begin(), a.end());
     stream.push_back(0x00);  // garbage byte forces a resync
     stream.insert(stream.end(), b.begin(), b.end());
@@ -73,16 +82,23 @@ static void testDecoder() {
     for (size_t chunk : {size_t(1), size_t(7), size_t(16), size_t(33), stream.size()}) {
         Decoder d;
         std::vector<Sample> got;
-        int hellos = 0;
+        int hellos = 0, cmds = 0;
         for (size_t off = 0; off < stream.size(); off += chunk) {
             size_t n = std::min(chunk, stream.size() - off);
-            d.feed(stream.data() + off, n, [&](const Sample &s) { got.push_back(s); },
-                   [&](const Hello &h) {
-                       hellos++;
-                       CHECK(h.width == 2800 && h.height == 1752);
-                   });
+            d.feed(
+                stream.data() + off, n, [&](const Sample &s) { got.push_back(s); },
+                [&](const Hello &h) {
+                    hellos++;
+                    CHECK(h.width == 2800 && h.height == 1752);
+                    CHECK(std::abs(h.xdpi - 266.3) < 1e-9 && h.ydpi == 0);
+                },
+                [&](const Command &c) {
+                    cmds++;
+                    CHECK(c.cmd == CMD_SCROLL && c.a == -12 && c.b == 300);
+                });
         }
         CHECK(hellos == 1);
+        CHECK(cmds == 1);
         CHECK(got.size() == 2);
         if (got.size() == 2) {
             CHECK(got[0].x == 1 && got[0].y == 2 && got[0].pressure == 3);
@@ -216,7 +232,7 @@ static void testAspect() {
     cfg.screen_w = 1920;
     cfg.screen_h = 1080;
     PenTranslator t(cfg);
-    Hello h{PROTOCOL_VERSION, 2800, 1752};
+    Hello h{PROTOCOL_VERSION, 2800, 1752, 0, 0};
     t.onHello(h);
     const double *r = t.mappedArea();
     double w = (r[2] - r[0]) * 1920, hgt = (r[3] - r[1]) * 1080;
@@ -266,8 +282,115 @@ static void testMonitors() {
     CHECK(!parseDisplayState("not a variant", mons, err));
 }
 
+static MonitorGeom qhd27() {
+    MonitorGeom m;
+    m.name = "DP-0";
+    m.x = 1920;
+    m.w = 2560;
+    m.h = 1440;
+    m.mm_w = 597;
+    m.mm_h = 336;
+    return m;
+}
+
+static void testPatch() {
+    Patch p;
+    p.setMonitor(qhd27());
+    CHECK(!p.ready());
+    // S9+ writing area next to a 160 px toolbar, 266 dpi.
+    CHECK(p.setTablet(2640, 1752, 266, 266));
+    CHECK(!p.setTablet(2640, 1752, 266, 266));
+    CHECK(p.ready());
+
+    // 1x: the patch covers the same physical width as the writing area.
+    double tabMm = 2640 / 266.0 * 25.4;
+    CHECK(std::abs(p.w * (597.0 / 2560) - tabMm) < 1.0);
+    CHECK(p.w % 2 == 0 && p.h % 2 == 0);
+    CHECK(std::abs(double(p.w) / p.h - 2640.0 / 1752) < 0.01);
+    // Starts centered.
+    CHECK(std::abs((p.x + p.w / 2.0) - 1280) <= 1 && std::abs((p.y + p.h / 2.0) - 720) <= 1);
+
+    int w1 = p.w;
+    p.setPreset(2);
+    CHECK(std::abs(p.w - 2 * w1) <= 2);
+    CHECK(p.x >= 0 && p.x + p.w <= 2560 && p.y >= 0 && p.y + p.h <= 1440);
+
+    // Steps never leave the monitor.
+    p.setPreset(0);
+    for (int i = 0; i < 20; i++) p.step(1, 1);
+    CHECK(p.x + p.w == 2560 && p.y + p.h == 1440);
+    p.step(-1, 0);
+    CHECK(p.x + p.w < 2560);
+
+    // Next block moves down by 85% of the height.
+    for (int i = 0; i < 20; i++) p.step(0, -1);
+    CHECK(p.y == 0);
+    int h = p.h;
+    p.next();
+    CHECK(std::abs(p.y - int(h * 0.85)) <= 1);
+
+    // Dragging the page right reveals what is to its left.
+    int x0 = p.x;
+    p.drag(100, 0);
+    CHECK(p.x < x0);
+    CHECK(std::abs((x0 - p.x) - 100 * p.monitorPxPerTabletPx()) <= 1);
+
+    double r[4];
+    p.normalized(r);
+    CHECK(std::abs(r[0] - p.x / 2560.0) < 1e-12 && std::abs(r[3] - (p.y + p.h) / 1440.0) < 1e-12);
+
+    // A preset too large for the monitor shrinks to fit, keeping the aspect ratio.
+    MonitorGeom small = qhd27();
+    small.w = 1280;
+    small.h = 720;
+    small.mm_w = 597;
+    Patch q;
+    q.setMonitor(small);
+    q.setTablet(2640, 1752, 266, 266);
+    q.setPreset(2);
+    CHECK(q.w <= 1280 && q.h <= 720);
+    CHECK(std::abs(double(q.w) / q.h - 2640.0 / 1752) < 0.01);
+}
+
+static void testNals() {
+    const uint8_t au[] = {0, 0, 0, 1, 0x67, 1, 2, 3, 0, 0, 1, 0x68, 9, 0, 0, 0, 1, 0x65, 7, 7, 7};
+    auto nals = splitNals(au, sizeof(au));
+    CHECK(nals.size() == 3);
+    if (nals.size() == 3) {
+        CHECK(nals[0].first == 0 && nals[0].second == 8);
+        CHECK(nals[1].first == 8 && nals[1].second == 5);
+        CHECK(nals[2].first == 13 && nals[2].second == 8);
+    }
+    std::vector<uint8_t> sps, pps;
+    CHECK(extractParameterSets(au, sizeof(au), sps, pps));
+    CHECK(sps.size() == 8 && sps[4] == 0x67);
+    CHECK(pps.size() == 5 && pps[3] == 0x68);
+    const uint8_t pframe[] = {0, 0, 0, 1, 0x41, 5, 5};
+    CHECK(!extractParameterSets(pframe, sizeof(pframe), sps, pps));
+}
+
+static void testPatchRectDrivesPen() {
+    PenTranslator t{PenConfig{}};
+    double r[4] = {0.25, 0.5, 0.75, 1.0};
+    t.setRect(r);
+    t.onHello(Hello{PROTOCOL_VERSION, 2640, 1752, 266, 266}); // must not override the patch
+    std::vector<input_event> ev;
+    t.onSample(S(FLAG_IN_RANGE, 0, 0), ev);
+    CHECK(last(ev, EV_ABS, ABS_X) == int(std::lround(0.25 * ABS_XY_MAX)));
+    CHECK(last(ev, EV_ABS, ABS_Y) == int(std::lround(0.5 * ABS_XY_MAX)));
+
+    // Toolbar eraser applies from the next hover.
+    t.setStickyEraser(true);
+    ev.clear();
+    t.onSample(S(FLAG_IN_RANGE), ev);
+    CHECK(last(ev, EV_KEY, BTN_TOOL_RUBBER) == 1);
+}
+
 int main() {
     testMonitors();
+    testPatch();
+    testNals();
+    testPatchRectDrivesPen();
     testDecoder();
     testStroke();
     testDirectContact();

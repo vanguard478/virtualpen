@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -15,8 +16,42 @@
 
 namespace vp {
 
-void runTcp(int port, const std::function<void()> &onConnect, const DataFn &onData,
-            const std::function<void()> &onDisconnect) {
+namespace {
+
+class TcpDownlink : public Downlink {
+public:
+    explicit TcpDownlink(int fd) : fd_(fd) {}
+
+    bool send(const uint8_t *data, size_t len, bool droppable) override {
+        std::lock_guard<std::mutex> lock(m_);
+        if (dead_) return false;
+        if (droppable) {
+            // Skip the frame rather than wait when the socket buffer is full.
+            pollfd p{fd_, POLLOUT, 0};
+            if (poll(&p, 1, 0) <= 0) return false;
+        }
+        while (len > 0) {
+            ssize_t n = ::send(fd_, data, len, MSG_NOSIGNAL);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                dead_ = true;
+                return false;
+            }
+            data += n;
+            len -= size_t(n);
+        }
+        return true;
+    }
+
+private:
+    std::mutex m_;
+    int fd_;
+    bool dead_ = false;
+};
+
+} // namespace
+
+void runTcp(int port, const LinkEvents &ev) {
     int srv = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     int one = 1;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -39,17 +74,20 @@ void runTcp(int port, const std::function<void()> &onConnect, const DataFn &onDa
         if (c < 0) continue;
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         fprintf(stderr, "tablet connected over tcp\n");
-        onConnect();
-        while (!g_stop) {
-            pollfd cp{c, POLLIN, 0};
-            if (poll(&cp, 1, 200) == 0) continue;
-            ssize_t n = recv(c, buf, sizeof(buf), 0);
-            if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) break;
-            onData(buf, size_t(n));
+        {
+            TcpDownlink downlink(c);
+            ev.up(&downlink);
+            while (!g_stop) {
+                pollfd cp{c, POLLIN, 0};
+                if (poll(&cp, 1, 200) == 0) continue;
+                ssize_t n = recv(c, buf, sizeof(buf), 0);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                ev.data(buf, size_t(n));
+            }
+            ev.down();
         }
         close(c);
-        onDisconnect();
         fprintf(stderr, "tablet disconnected\n");
     }
     close(srv);

@@ -43,6 +43,12 @@ public:
     explicit PenTranslator(const PenConfig &cfg);
 
     void onHello(const Hello &h);
+    // Maps the writing area to this rectangle (normalized output coordinates)
+    // instead of the configured area; used by the patch.
+    void setRect(const double r[4]);
+    // Toolbar eraser: the pen erases until switched off.
+    void setStickyEraser(bool on) { sticky_eraser_ = on; }
+    bool stickyEraser() const { return sticky_eraser_; }
     // Appends the evdev frames for one sample. Each frame ends in SYN_REPORT.
     void onSample(const Sample &s, std::vector<input_event> &out);
     // Takes the pen out of proximity (link lost, shutdown).
@@ -58,6 +64,8 @@ private:
     double rect_[4];
     int tablet_w_ = 2800, tablet_h_ = 1752;  // Galaxy Tab S9+ landscape
 
+    bool manual_rect_ = false;
+    bool sticky_eraser_ = false;
     bool in_prox_ = false;
     bool touching_ = false;
     int tool_ = BTN_TOOL_PEN;

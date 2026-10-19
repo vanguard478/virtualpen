@@ -39,11 +39,18 @@ void PenTranslator::onHello(const Hello &h) {
         tablet_h_ = h.height;
     }
     updateRect();
-    fprintf(stderr, "tablet surface %dx%d px -> area [%.4f %.4f %.4f %.4f]\n", tablet_w_, tablet_h_,
-            rect_[0], rect_[1], rect_[2], rect_[3]);
+    if (!manual_rect_)
+        fprintf(stderr, "tablet surface %dx%d px -> area [%.4f %.4f %.4f %.4f]\n", tablet_w_, tablet_h_, rect_[0],
+                rect_[1], rect_[2], rect_[3]);
+}
+
+void PenTranslator::setRect(const double r[4]) {
+    std::copy(r, r + 4, rect_);
+    manual_rect_ = true;
 }
 
 void PenTranslator::updateRect() {
+    if (manual_rect_) return;
     std::copy(cfg_.area, cfg_.area + 4, rect_);
     if (cfg_.screen_w <= 0 || cfg_.screen_h <= 0) return;
     // Fit a rectangle with the tablet's aspect ratio, centered in the area.
@@ -113,7 +120,7 @@ void PenTranslator::onSample(const Sample &s, std::vector<input_event> &out) {
     // Never switch tools in the middle of a stroke; the switch happens on the
     // next hover or contact.
     if (!touching_) {
-        bool eraser = (s.flags & FLAG_ERASER) || (cfg_.button == ButtonMode::Eraser && button);
+        bool eraser = sticky_eraser_ || (s.flags & FLAG_ERASER) || (cfg_.button == ButtonMode::Eraser && button);
         int tool = eraser ? BTN_TOOL_RUBBER : BTN_TOOL_PEN;
         if (in_prox_ && tool != tool_) proximityOut(out);
         tool_ = tool;

@@ -1,11 +1,12 @@
 package com.virtual_pen;
 
 /**
- * Binary wire format shared with pen-host/protocol.h (protocol v2): fixed
- * 16-byte little-endian records, no allocation on the hot path.
+ * Binary wire format shared with pen-host/protocol.h (protocol v3). Uplink:
+ * fixed 16-byte little-endian records, no allocation on the hot path.
+ * Downlink: messages with an 8-byte header (type, flags, 2 reserved, u32 length).
  */
 final class PenProtocol {
-    static final int VERSION = 2;
+    static final int VERSION = 3;
     static final int RECORD_SIZE = 16;
     // Keep a batch below 512 bytes so it always fits a single high-speed USB packet.
     static final int MAX_BATCH = 31;
@@ -17,8 +18,27 @@ final class PenProtocol {
     static final int FLAG_BTN_SECONDARY = 1 << 3;
     static final int FLAG_ERASER = 1 << 4;
 
+    static final int CMD_UNDO = 1;
+    static final int CMD_REDO = 2;
+    static final int CMD_ERASER = 3;
+    static final int CMD_PATCH_STEP = 4;
+    static final int CMD_PATCH_NEXT = 5;
+    static final int CMD_PATCH_PRESET = 6;
+    static final int CMD_PATCH_DRAG = 7;
+    static final int CMD_SCROLL = 8;
+    static final int CMD_KEYFRAME = 9;
+
+    static final int DL_HEADER_SIZE = 8;
+    static final int DL_GEOMETRY = 'G';
+    static final int DL_CODEC = 'C';
+    static final int DL_FRAME = 'V';
+    static final int DL_FLAG_KEYFRAME = 1;
+    static final int GEO_ERASER = 1;
+    static final int GEO_PREVIEW = 2;
+
     private static final byte TYPE_SAMPLE = 'S';
     private static final byte TYPE_HELLO = 'H';
+    private static final byte TYPE_COMMAND = 'K';
 
     private PenProtocol() {}
 
@@ -47,13 +67,36 @@ final class PenProtocol {
         return o + RECORD_SIZE;
     }
 
-    static int putHello(byte[] b, int o, int width, int height) {
+    static int putHello(byte[] b, int o, int width, int height, float xdpi, float ydpi) {
         b[o] = TYPE_HELLO;
         b[o + 1] = (byte) VERSION;
         put16(b, o + 2, width);
         put16(b, o + 4, height);
+        put16(b, o + 6, Math.round(xdpi * 10f));
+        put16(b, o + 8, Math.round(ydpi * 10f));
+        for (int i = 10; i < RECORD_SIZE; i++) b[o + i] = 0;
+        return o + RECORD_SIZE;
+    }
+
+    static int putCommand(byte[] b, int o, int command, int a, int bArg) {
+        b[o] = TYPE_COMMAND;
+        b[o + 1] = (byte) command;
+        put16(b, o + 2, clamp16(a));
+        put16(b, o + 4, clamp16(bArg));
         for (int i = 6; i < RECORD_SIZE; i++) b[o + i] = 0;
         return o + RECORD_SIZE;
+    }
+
+    static int rd16(byte[] b, int o) {
+        return (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8);
+    }
+
+    static int rd32(byte[] b, int o) {
+        return rd16(b, o) | (rd16(b, o + 2) << 16);
+    }
+
+    private static int clamp16(int v) {
+        return Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, v));
     }
 
     private static int unit16(float v) {

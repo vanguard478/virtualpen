@@ -5,9 +5,10 @@ set -eu
 
 cd "$(dirname "$0")"
 
-if ! pkg-config --exists libusb-1.0 glib-2.0; then
+if ! pkg-config --exists libusb-1.0 glib-2.0 libavcodec libswscale x11 xext xrandr; then
     echo "Installing build dependencies (sudo)..."
-    sudo apt-get install -y build-essential cmake pkg-config libusb-1.0-0-dev libglib2.0-dev
+    sudo apt-get install -y build-essential cmake pkg-config libusb-1.0-0-dev libglib2.0-dev \
+        libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxrandr-dev
 fi
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

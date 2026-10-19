@@ -11,6 +11,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.util.Log;
 
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,7 +26,9 @@ import java.util.concurrent.locks.LockSupport;
  * TCP on localhost, which reaches the PC through {@code adb reverse}.
  *
  * <p>The UI thread hands batches to a dedicated writer thread through a
- * lock-free ring, so a stalled host can never block input dispatch.
+ * lock-free ring, so a stalled host can never block input dispatch. The
+ * connector thread reads the host's downlink (patch geometry, preview video)
+ * for as long as the link is up.
  */
 final class PenLink {
     // Must match the identity sent by pen-host/usb.cpp and res/xml/accessory_filter.xml.
@@ -36,10 +39,20 @@ final class PenLink {
     interface Listener {
         /** Called on the UI thread. */
         void onLinkState(boolean connected, String description);
+
+        /**
+         * Called on the connector thread for each downlink message. The
+         * payload is only valid during the call.
+         */
+        void onMessage(int type, int flags, byte[] buf, int offset, int length);
     }
 
     private static final String TAG = "PenLink";
     private static final int SLOTS = 64;
+    // The accessory driver hands out at most 16 KiB per read, and a shorter
+    // read can lose data, so always ask for a full chunk.
+    private static final int READ_CHUNK = 16384;
+    private static final int MAX_MESSAGE = 8 << 20;
 
     private final Context context;
     private final UsbManager usbManager;
@@ -56,7 +69,9 @@ final class PenLink {
     private volatile OutputStream out;
     private ParcelFileDescriptor accessoryFd;
     private Socket socket;
+    private InputStream downlink;
     private boolean permissionRequested;
+    private final byte[] commandBuf = new byte[PenProtocol.RECORD_SIZE];
     private Thread writer;
     private Thread connector;
 
@@ -89,6 +104,12 @@ final class PenLink {
         synchronized (lock) {
             lock.notifyAll();
         }
+    }
+
+    /** UI thread only. */
+    boolean sendCommand(int command, int a, int b) {
+        int len = PenProtocol.putCommand(commandBuf, 0, command, a, b);
+        return send(commandBuf, len);
     }
 
     /** UI thread only. Returns false if the batch was dropped. */
@@ -163,14 +184,10 @@ final class PenLink {
                     postState(true, "Connected via " + via);
                 }
             }
-            Socket s = socket;
-            if (out != null && s != null) {
-                // TCP: block until the host closes the connection.
-                try {
-                    InputStream in = s.getInputStream();
-                    while (running && in.read() >= 0) { /* host never sends data */ }
-                } catch (IOException ignored) {
-                }
+            InputStream in = downlink;
+            if (out != null && in != null) {
+                // Blocks for the lifetime of the link.
+                readDownlink(in);
                 disconnect("host closed");
                 continue;
             }
@@ -181,6 +198,40 @@ final class PenLink {
                     return;
                 }
             }
+        }
+    }
+
+    private void readDownlink(InputStream in) {
+        byte[] chunk = new byte[READ_CHUNK];
+        byte[] msg = new byte[256 * 1024];
+        int have = 0;
+        try {
+            while (running && out != null) {
+                int n = in.read(chunk, 0, chunk.length);
+                if (n < 0) return;
+                if (have + n > msg.length) {
+                    byte[] bigger = new byte[Math.max(msg.length * 2, have + n)];
+                    System.arraycopy(msg, 0, bigger, 0, have);
+                    msg = bigger;
+                }
+                System.arraycopy(chunk, 0, msg, have, n);
+                have += n;
+                int pos = 0;
+                while (have - pos >= PenProtocol.DL_HEADER_SIZE) {
+                    int len = PenProtocol.rd32(msg, pos + 4);
+                    if (len < 0 || len > MAX_MESSAGE) {
+                        Log.w(TAG, "bad downlink message length " + len);
+                        return;
+                    }
+                    if (have - pos < PenProtocol.DL_HEADER_SIZE + len) break;
+                    listener.onMessage(msg[pos] & 0xff, msg[pos + 1] & 0xff, msg,
+                            pos + PenProtocol.DL_HEADER_SIZE, len);
+                    pos += PenProtocol.DL_HEADER_SIZE + len;
+                }
+                System.arraycopy(msg, pos, msg, 0, have - pos);
+                have -= pos;
+            }
+        } catch (IOException ignored) {
         }
     }
 
@@ -203,6 +254,7 @@ final class PenLink {
             if (fd == null) return null;
             synchronized (lock) {
                 accessoryFd = fd;
+                downlink = new FileInputStream(fd.getFileDescriptor());
             }
             return new FileOutputStream(fd.getFileDescriptor());
         }
@@ -216,6 +268,7 @@ final class PenLink {
             s.connect(new InetSocketAddress("127.0.0.1", TCP_PORT), 300);
             synchronized (lock) {
                 socket = s;
+                downlink = s.getInputStream();
             }
             return s.getOutputStream();
         } catch (IOException e) {
@@ -239,6 +292,7 @@ final class PenLink {
         }
         accessoryFd = null;
         socket = null;
+        downlink = null;
     }
 
     private void postState(boolean connected, String text) {

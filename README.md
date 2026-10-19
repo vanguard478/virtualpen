@@ -5,11 +5,41 @@ pen tablet for an **Ubuntu 24.04** PC. It is built for writing in OneNote (web o
 wrapper) and is deliberately not generic.
 
 ```
-S Pen ─► Android app (raw, unbatched MotionEvents)
+S Pen ─► Android app (raw, unbatched MotionEvents, wet ink drawn locally)
         ─► 16-byte binary records over USB accessory mode (AOA), or adb reverse TCP
         ─► virtualpen-host (async libusb, one uinput write per USB packet)
-        ─► /dev/uinput "Virtual Pen Stylus" ─► libinput ─► compositor ─► browser/OneNote
+        ─► /dev/uinput "Virtual Pen Stylus" ─► libinput ─► X11/GNOME ─► browser/OneNote
+
+Patch on the monitor ─► XShm capture ─► NVENC H.264 ─► same USB cable
+        ─► tablet hardware decoder ─► shown under the pen
 ```
+
+## How you write with it
+
+The tablet shows a live view of a **patch**: a rectangle of your monitor exactly the shape of the
+tablet's writing area. The pen writes into that patch. You see the OneNote page under the nib and
+can continue on the same line. When a paragraph or page is done, move the patch with the toolbar
+or scroll OneNote under it with two fingers; the preview follows either way.
+
+**Toolbar (left edge):**
+
+| Button | Does |
+|---|---|
+| ↶ Undo / ↷ Redo | Ctrl+Z / Ctrl+Y on the PC |
+| Eraser | pen erases until you tap it again (the S Pen button still erases while held) |
+| Ink / Width | colour and width of the instant local ink (match your OneNote pen) |
+| Next ⤓ | patch jumps one block down, keeping the last ~15% visible so you can keep your line |
+| ▲ ▼ ◀ ▶ | move the patch by half its size |
+| 1× / 1.5× / 2× | patch size: 1× = ink on the monitor is the size you wrote it; 2× = twice as large |
+| Move | while on, one finger drags the page (the patch moves) |
+| ⟳ | ask for a fresh video frame |
+
+**Fingers on the writing area:** two-finger drag scrolls OneNote (content follows the fingers).
+Fingers are ignored while the pen is near the glass, so a resting palm does nothing.
+
+**Instant ink:** the tablet draws the last 250 ms of your stroke itself, at the panel's 120 Hz, so ink
+appears under the nib immediately. By the time it fades, OneNote's real ink has arrived in the
+preview underneath. It is only a visual bridge; OneNote holds the real ink.
 
 ## What changed compared to upstream
 
@@ -52,13 +82,22 @@ virtualpen-host --list-monitors
 virtualpen-host --monitor DP-1
 ```
 
-The names are the ones GNOME Settings → Displays shows. `--monitor` accepts the connector
-(`DP-1`), the number from the list, or the display name (or any unique part of it). It pins the
-tablet to that monitor and fits the tablet's 16:10 shape inside it, so handwriting isn't stretched.
+The names are the ones GNOME Settings → Displays shows. With the NVIDIA driver on X11, connectors
+are typically called `DP-0`, `HDMI-0`, …; use what `--list-monitors` prints. `--monitor` accepts the
+connector, the number from the list, or the display name (or any unique part of it). It pins the
+tablet to that monitor, and the patch and preview are taken from it. Always pass it when you have
+more than one monitor, otherwise pen and preview may not line up.
+
+The preview needs an X11 session (`echo $XDG_SESSION_TYPE` prints `x11`) and uses the NVIDIA
+encoder when available. Check with `ffmpeg -hide_banner -encoders | grep h264_nvenc`; the
+encoder library comes with the NVIDIA driver package. Without it the host falls back to the CPU
+encoder (x264), which also works for this patch size. Use `--encoder nvenc` to require the GPU.
 
 To run it in the background, add your options (e.g. `--monitor DP-1`) to the `ExecStart` line in
 `~/.config/systemd/user/virtualpen-host.service` and run
-`systemctl --user enable --now virtualpen-host`.
+`systemctl --user enable --now virtualpen-host`. The preview needs `DISPLAY`: GNOME normally passes
+it to user services; if the log says it cannot open the X display, add `Environment=DISPLAY=:0` to
+the unit.
 
 ### Tablet
 
@@ -86,8 +125,15 @@ roughly a millisecond.
 |---|---|---|
 | `--list-monitors` | | list attached monitors (connector, resolution, position, name) and exit |
 | `--monitor ID` | GNOME's choice | pin the tablet to a monitor; `auto` hands the choice back to GNOME |
-| `--screen WxH` | from `--monitor`, else off (stretch) | monitor pixel size, so the 16:10 tablet maps to a 16:10 area |
-| `--area X0,Y0,X1,Y1` | `0,0,1,1` | map to part of the monitor, e.g. `0.5,0,1,1` = right half |
+| `--zoom Z` | `1` | starting patch size: `1`, `1.5` or `2` |
+| `--monitor-size-mm WxH` | from EDID | physical monitor size, if the monitor doesn't report it (affects 1× sizing) |
+| `--no-preview` | preview on | map the patch but don't stream it |
+| `--preview-fps N` | `60` | preview frame rate; unchanged frames are never sent |
+| `--preview-mbps N` | `12` | preview bitrate; raise it if small text looks soft |
+| `--encoder NAME` | `auto` | `nvenc`, `x264` or `auto` (NVENC first) |
+| `--scroll-px N` | `53` | screen pixels per wheel notch, tunes two-finger scroll speed |
+| `--area X0,Y0,X1,Y1` | | fixed mapping instead of the patch, e.g. `0.5,0,1,1` = right half (no preview) |
+| `--screen WxH` | from `--monitor` | with `--area`: monitor pixel size, so the 16:10 tablet isn't stretched |
 | `--pressure-max F` | `1.0` | lower it (e.g. `0.7`) to reach full pressure with a lighter hand |
 | `--pressure-min F` | `0.0` | ignore the bottom of the raw range |
 | `--gamma F` | `1.0` | `<1` makes light strokes thicker, `>1` thinner |
@@ -129,15 +175,20 @@ Wayland or Xorg); on other desktops use `--screen` and `--area`.
 
 ## Where the latency goes
 
-The pipeline now adds very little on top of the hardware. The S Pen digitizer and Android's input
-reader add a few ms. Unbuffered dispatch removes up to one frame of vsync batching. USB plus the
-host adds well under a millisecond. Most of what you see is the compositor and the browser
-painting the stroke, and that part is out of this project's hands.
+**Pen to PC:** the S Pen digitizer and Android's input reader add a few ms. Unbuffered dispatch
+removes up to one frame of vsync batching. USB plus the host adds well under a millisecond. The
+pen path never waits on the preview: video frames are dropped, never queued ahead of pen samples.
+
+**Ink under the nib:** the instant local ink appears within about one 120 Hz frame. OneNote's real
+ink then takes the PC's own drawing time plus the preview trip (capture at the next screen refresh,
+a few ms of NVENC encoding, USB, hardware decode, one tablet frame). That's an estimated 30–50 ms;
+the 250 ms local trail covers it.
 
 ## Building manually
 
 ```sh
-sudo apt install build-essential cmake pkg-config libusb-1.0-0-dev
+sudo apt install build-essential cmake pkg-config libusb-1.0-0-dev libglib2.0-dev \
+    libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev libxrandr-dev
 cmake -S pen-host -B pen-host/build && cmake --build pen-host/build && pen-host/build/pen-test
 ```
 
