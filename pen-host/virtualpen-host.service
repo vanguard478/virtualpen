@@ -2,7 +2,7 @@
 Description=Virtual Pen host (Galaxy Tab S9+ as a pen tablet)
 
 [Service]
-# Add your options, e.g. --screen 2560x1440
+# Add your options, e.g. --monitor DP-0
 ExecStart=/usr/local/bin/virtualpen-host
 Restart=on-failure
 RestartSec=2
