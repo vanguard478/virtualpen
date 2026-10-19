@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <resources>
-    <usb-accessory manufacturer="mbeliveau" model="VirtualStylusHost" version="1.0"/>
+    <!-- Must match the identity sent by pen-host/usb.cpp. -->
+    <usb-accessory manufacturer="virtualpen" model="S9PenHost" version="2"/>
 </resources>

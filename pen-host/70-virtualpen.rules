@@ -1,0 +1,9 @@
+# Virtual Pen: give the logged-in user access to the tablet and to uinput.
+# 70- so uaccess is applied before 73-seat-late.rules.
+
+# Samsung devices (Galaxy Tab S9+) before the switch to accessory mode.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04e8", TAG+="uaccess"
+# Any device in Android accessory mode (Google AOA ids).
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d0[0-5]", TAG+="uaccess"
+# Creating the virtual tablet.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

@@ -6,4 +6,11 @@
     </style>
 
     <style name="Theme.Peninput" parent="Base.Theme.Peninput" />
+
+    <!-- Pen surface: no window chrome, black background, drawn under the cutout. -->
+    <style name="Theme.VirtualPen.Fullscreen" parent="android:Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+        <item name="android:windowIsTranslucent">false</item>
+    </style>
 </resources>
